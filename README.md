@@ -13,3 +13,9 @@ You can run `--help` for a quick refresher on usage.
 ## License
 
 Licensed with the Be Gay Do Crime license.
+
+## Credits
+
+Maintained by me (ikuyo).
+
+Original code cleanup by [gotyaoi](https://github.com/gotyaoi)
