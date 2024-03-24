@@ -1,10 +1,11 @@
 import argparse
 import asyncio
-import functools
+from urllib.parse import unquote, urljoin
+import sys
 
 import aiohttp
-from requests.utils import unquote
-from requests_html import HTMLResponse, HTMLSession, AsyncHTMLSession
+from lxml import etree
+from lxml.cssselect import CSSSelector
 
 
 async def download_file(
@@ -26,56 +27,67 @@ async def download_file(
                 print(f"Downloaded file {filename}")
 
 
+INFO_SELECTOR = CSSSelector('p[align="left"]')
+DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
+DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
+
+
 async def main(args: argparse.Namespace) -> None:
 
-    def print_if_verbose(msg: str) -> None:
+    def print_if_verbose(*msg: str) -> None:
         if args.verbose:
-            print(msg)
+            print(*msg, file=sys.stderr)
+
+    html_parser = etree.HTMLParser()
 
     url = args.url
 
-    session = HTMLSession()
-    r = session.get(url)
-    print_if_verbose("Obtained list URL...")
-    asession = AsyncHTMLSession(loop=asyncio.get_running_loop())
+    async with aiohttp.ClientSession(raise_for_status=True) as session:
 
-    async def get_url(url: str) -> HTMLResponse:
-        return await asession.get(url)
+        async def get_url(url: str) -> etree.ElementTree:
+            try:
+                async with session.get(url) as resp:
+                    return etree.fromstring(await resp.text(), html_parser)
+            except aiohttp.ClientError as err:
+                raise
 
-    track_links = []
-    if not r.raise_for_status():
-        print_if_verbose("Obtained URL for " + r.html.find("h2", first=True).text)
-        info_paragraph = r.html.find('p[align="left"]', first=True).text.splitlines()
+        try:
+            async with session.get(url) as resp:
+                print_if_verbose("Obtained list URL...")
+                album_doc = etree.fromstring(await resp.text(), html_parser)
+        except aiohttp.ClientError as err:
+            pass
+        print_if_verbose("Obtained URL for ", album_doc.findtext(".//h2"))
+        info_paragraph = etree.tostring(
+            INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
+        ).splitlines()
         for line in info_paragraph:
             if "Number of Files" in line:
                 track_count = int(line.split(":")[-1])
-
+                break
         print_if_verbose(f"{track_count} songs available")
-
-        table = [
-            min(x.absolute_links)
-            for x in r.html.find("#songlist .playlistDownloadSong")
-        ]
-        track_links = [functools.partial(get_url, url) for url in table]
-
-    r = []
-    async with asyncio.TaskGroup() as tg:
-        for track in track_links:
-            r.append(tg.create_task(track()))
-    flac_possible = True
-    async with aiohttp.ClientSession() as download_session, asyncio.TaskGroup() as tg:
-        for result in (t.result() for t in r):
-            if args.prefer_flac and flac_possible:
-                audio = [x for x in list(result.html.absolute_links) if ".flac" in x]
-                if not audio and flac_possible:
-                    flac_possible = False
-                    print("No FLAC files available, defaulting to mp3...")
-                    audio = result.html.find("audio", first=True).attrs["src"]
+        async with asyncio.TaskGroup() as tg:
+            page_tasks = [
+                # why is min necessary?
+                tg.create_task(
+                    get_url(urljoin(url, min(y.get("href") for y in x.findall("a"))))
+                )
+                for x in DOWNLOAD_PAGE_SELECTOR(album_doc)
+            ]
+        async with asyncio.TaskGroup() as tg:
+            for result in (t.result() for t in page_tasks):
+                audio_links = {
+                    y[y.rindex(".") + 1 :]: y
+                    for y in (
+                        x.getparent().get("href")
+                        for x in DOWNLOAD_LINK_SELECTOR(result)
+                    )
+                }
+                if args.prefer_flac and "flac" in audio_links:
+                    audio_link = audio_links["flac"]
                 else:
-                    audio = audio[-1]
-            else:
-                audio = result.html.find("audio", first=True).attrs["src"]
-            tg.create_task(download_file(audio, download_session, args.verbose))
+                    audio_link = audio_links["mp3"]
+                tg.create_task(download_file(audio_link, session, args.verbose))
 
 
 if __name__ == "__main__":
