@@ -27,9 +27,32 @@ async def download_file(
                 print(f"Downloaded file {filename}")
 
 
+DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
+
+
+async def process_download_page(
+    url: str, session: aiohttp.ClientSession, html_parser: etree.HTMLParser
+) -> None:
+    try:
+        async with session.get(url) as resp:
+            download_doc = etree.fromstring(await resp.text(), html_parser)
+    except aiohttp.ClientError as err:
+        raise
+    audio_links = {
+        y[y.rindex(".") + 1 :]: y
+        for y in (
+            x.getparent().get("href") for x in DOWNLOAD_LINK_SELECTOR(download_doc)
+        )
+    }
+    if args.prefer_flac and "flac" in audio_links:
+        audio_link = audio_links["flac"]
+    else:
+        audio_link = audio_links["mp3"]
+    await download_file(audio_link, session, args.verbose)
+
+
 INFO_SELECTOR = CSSSelector('p[align="left"]')
 DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
-DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -43,20 +66,12 @@ async def main(args: argparse.Namespace) -> None:
     url = args.url
 
     async with aiohttp.ClientSession(raise_for_status=True) as session:
-
-        async def get_url(url: str) -> etree.ElementTree:
-            try:
-                async with session.get(url) as resp:
-                    return etree.fromstring(await resp.text(), html_parser)
-            except aiohttp.ClientError as err:
-                raise
-
         try:
             async with session.get(url) as resp:
                 print_if_verbose("Obtained list URL...")
                 album_doc = etree.fromstring(await resp.text(), html_parser)
         except aiohttp.ClientError as err:
-            pass
+            raise
         print_if_verbose("Obtained URL for ", album_doc.findtext(".//h2"))
         info_paragraph = etree.tostring(
             INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
@@ -67,27 +82,17 @@ async def main(args: argparse.Namespace) -> None:
                 break
         print_if_verbose(f"{track_count} songs available")
         async with asyncio.TaskGroup() as tg:
-            page_tasks = [
-                # why is min necessary?
+            for download_page_url in DOWNLOAD_PAGE_SELECTOR(album_doc):
                 tg.create_task(
-                    get_url(urljoin(url, min(y.get("href") for y in x.findall("a"))))
-                )
-                for x in DOWNLOAD_PAGE_SELECTOR(album_doc)
-            ]
-        async with asyncio.TaskGroup() as tg:
-            for result in (t.result() for t in page_tasks):
-                audio_links = {
-                    y[y.rindex(".") + 1 :]: y
-                    for y in (
-                        x.getparent().get("href")
-                        for x in DOWNLOAD_LINK_SELECTOR(result)
+                    process_download_page(
+                        urljoin(
+                            url,
+                            min(x.get("href") for x in download_page_url.findall("a")),
+                        ),
+                        session,
+                        html_parser,
                     )
-                }
-                if args.prefer_flac and "flac" in audio_links:
-                    audio_link = audio_links["flac"]
-                else:
-                    audio_link = audio_links["mp3"]
-                tg.create_task(download_file(audio_link, session, args.verbose))
+                )
 
 
 if __name__ == "__main__":
