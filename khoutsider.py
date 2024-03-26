@@ -48,7 +48,8 @@ async def process_download_page(
         audio_link = audio_links["flac"]
     else:
         audio_link = audio_links["mp3"]
-    await download_file(audio_link, session, args.verbose)
+    # URL join just in case it's a relative link.
+    await download_file(urljoin(url, audio_link), session, args.verbose)
 
 
 INFO_SELECTOR = CSSSelector('p[align="left"]')
@@ -87,6 +88,9 @@ async def main(args: argparse.Namespace) -> None:
                     process_download_page(
                         urljoin(
                             url,
+                            # is min necesssary here?
+                            # are there any pages that have multilple links here?
+                            # is min the right way to choose among them?
                             min(x.get("href") for x in download_page_url.findall("a")),
                         ),
                         session,
