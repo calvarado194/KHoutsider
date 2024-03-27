@@ -1,43 +1,55 @@
 import argparse
 import asyncio
-from urllib.parse import unquote, urljoin
+import os
 import sys
+from urllib.parse import unquote, urljoin
 
 import aiohttp
+import aiohttp_retry
 from lxml import etree
 from lxml.cssselect import CSSSelector
 
 
-async def download_file(
-    url: str, session: aiohttp.ClientSession, verbose: bool = False
-) -> None:
-    async with session.get(url) as response:
-        if "content-disposition" in response.headers:
-            header = response.headers["content-disposition"]
-            filename = header.split("filename=")[1]
-        else:
-            filename = url.split("/")[-1]
+class KHOutsiderError(Exception):
+    pass
 
-        filename = unquote(filename)
-        with open(filename, mode="wb") as file:
-            # 10 MB chunks
-            async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
-                file.write(chunk)
-            if verbose:
-                print(f"Downloaded file {filename}")
+
+async def download_file(
+    url: str, session: aiohttp_retry.RetryClient, verbose: bool = False
+) -> None:
+    try:
+        async with session.get(url) as response:
+            if "content-disposition" in response.headers:
+                header = response.headers["content-disposition"]
+                filename = header.split("filename=")[1]
+            else:
+                filename = url.split("/")[-1]
+
+            filename = unquote(filename)
+            with open(filename, mode="wb") as file:
+                # 10 MB chunks
+                async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
+                    file.write(chunk)
+                if verbose:
+                    print(f"Downloaded file {filename}")
+    except BaseException:
+        # Clean up after ourselves
+        try:
+            os.unlink(filename)
+        except FileNotFoundError:
+            pass
+        # Let the exception bubble up
+        raise
 
 
 DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
 
 
 async def process_download_page(
-    url: str, session: aiohttp.ClientSession, html_parser: etree.HTMLParser
+    url: str, session: aiohttp_retry.RetryClient, html_parser: etree.HTMLParser
 ) -> None:
-    try:
-        async with session.get(url) as resp:
-            download_doc = etree.fromstring(await resp.text(), html_parser)
-    except aiohttp.ClientError as err:
-        raise
+    async with session.get(url) as resp:
+        download_doc = etree.fromstring(await resp.text(), html_parser)
     audio_links = {
         y[y.rindex(".") + 1 :]: y
         for y in (
@@ -47,7 +59,10 @@ async def process_download_page(
     if args.prefer_flac and "flac" in audio_links:
         audio_link = audio_links["flac"]
     else:
-        audio_link = audio_links["mp3"]
+        try:
+            audio_link = audio_links["mp3"]
+        except KeyError:
+            raise KHOutsiderError(f"Could not find download links on {url}")
     # URL join just in case it's a relative link.
     await download_file(urljoin(url, audio_link), session, args.verbose)
 
@@ -66,37 +81,64 @@ async def main(args: argparse.Namespace) -> None:
 
     url = args.url
 
-    async with aiohttp.ClientSession(raise_for_status=True) as session:
+    retry_options = aiohttp_retry.JitterRetry(attempts=5)
+    async with aiohttp_retry.RetryClient(
+        raise_for_status=True, retry_options=retry_options
+    ) as session:
         try:
             async with session.get(url) as resp:
                 print_if_verbose("Obtained list URL...")
                 album_doc = etree.fromstring(await resp.text(), html_parser)
         except aiohttp.ClientError as err:
-            raise
+            print("An error occurred in fetching the album at", url)
+            print(err)
+            return
         print_if_verbose("Obtained URL for ", album_doc.findtext(".//h2"))
-        info_paragraph = etree.tostring(
-            INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
-        ).splitlines()
-        for line in info_paragraph:
-            if "Number of Files" in line:
-                track_count = int(line.split(":")[-1])
-                break
-        print_if_verbose(f"{track_count} songs available")
-        async with asyncio.TaskGroup() as tg:
-            for download_page_url in DOWNLOAD_PAGE_SELECTOR(album_doc):
-                tg.create_task(
-                    process_download_page(
-                        urljoin(
-                            url,
-                            # is min necesssary here?
-                            # are there any pages that have multilple links here?
-                            # is min the right way to choose among them?
-                            min(x.get("href") for x in download_page_url.findall("a")),
-                        ),
-                        session,
-                        html_parser,
+        try:
+            info_paragraph = etree.tostring(
+                INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
+            ).splitlines()
+            for line in info_paragraph:
+                if "Number of Files" in line:
+                    track_count = int(line.split(":")[-1])
+                    break
+            print_if_verbose(f"{track_count} songs available")
+        except (IndexError, NameError):
+            print_if_verbose("Could not find album info for", url)
+        try:
+            async with asyncio.TaskGroup() as tg:
+                download_page_urls = DOWNLOAD_PAGE_SELECTOR(album_doc)
+                if len(download_page_urls) == 0:
+                    raise KHOutsiderError(f"No songs found on {url}")
+                for download_page_url in download_page_urls:
+                    tg.create_task(
+                        process_download_page(
+                            urljoin(
+                                url,
+                                # is min necesssary here?
+                                # are there any pages that have multilple links here?
+                                # is min the right way to choose among them?
+                                min(
+                                    x.get("href")
+                                    for x in download_page_url.findall("a")
+                                ),
+                            ),
+                            session,
+                            html_parser,
+                        )
                     )
-                )
+        except ExceptionGroup as err:
+            print(
+                "The following errors occurred while trying to download songs from the album at",
+                url,
+            )
+            match, rest = err.split((aiohttp.ClientError, KHOutsiderError))
+            if match is not None:
+                for exc in match.exceptions:
+                    print(exc)
+            if rest is not None:
+                print("Unexpected errors occurred. Raising.")
+                raise rest
 
 
 if __name__ == "__main__":
