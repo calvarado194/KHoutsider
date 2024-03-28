@@ -46,7 +46,11 @@ DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
 
 
 async def process_download_page(
-    url: str, session: aiohttp_retry.RetryClient, html_parser: etree.HTMLParser
+    url: str,
+    session: aiohttp_retry.RetryClient,
+    html_parser: etree.HTMLParser,
+    prefer_flac: bool,
+    verbose: bool = False,
 ) -> None:
     async with session.get(url) as resp:
         download_doc = etree.fromstring(await resp.text(), html_parser)
@@ -56,7 +60,7 @@ async def process_download_page(
             x.getparent().get("href") for x in DOWNLOAD_LINK_SELECTOR(download_doc)
         )
     }
-    if args.prefer_flac and "flac" in audio_links:
+    if prefer_flac and "flac" in audio_links:
         audio_link = audio_links["flac"]
     else:
         try:
@@ -64,22 +68,22 @@ async def process_download_page(
         except KeyError:
             raise KHOutsiderError(f"Could not find download links on {url}")
     # URL join just in case it's a relative link.
-    await download_file(urljoin(url, audio_link), session, args.verbose)
+    await download_file(urljoin(url, audio_link), session, verbose)
 
 
 INFO_SELECTOR = CSSSelector('p[align="left"]')
 DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
 
 
-async def main(args: argparse.Namespace) -> None:
+async def process_album_page(
+    url: str, prefer_flac: bool, verbose: bool = False
+) -> None:
 
     def print_if_verbose(*msg: str) -> None:
-        if args.verbose:
+        if verbose:
             print(*msg, file=sys.stderr)
 
     html_parser = etree.HTMLParser()
-
-    url = args.url
 
     retry_options = aiohttp_retry.JitterRetry(attempts=5)
     async with aiohttp_retry.RetryClient(
@@ -125,6 +129,8 @@ async def main(args: argparse.Namespace) -> None:
                             ),
                             session,
                             html_parser,
+                            prefer_flac,
+                            verbose,
                         )
                     )
         except ExceptionGroup as err:
@@ -141,7 +147,7 @@ async def main(args: argparse.Namespace) -> None:
                 raise rest
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(
         prog="KHOutsider",
         description="Automatically download a full album from KHInsider",
@@ -158,4 +164,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    asyncio.run(main(args))
+    asyncio.run(process_album_page(args.url, args.verbose))
+
+
+if __name__ == "__main__":
+    main()
