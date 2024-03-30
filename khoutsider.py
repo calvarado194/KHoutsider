@@ -1,7 +1,7 @@
 import argparse
 import asyncio
+import logging
 import os
-import sys
 from urllib.parse import unquote, urljoin
 
 import aiohttp
@@ -11,6 +11,7 @@ from lxml.cssselect import CSSSelector
 
 
 HTML_PARSER = etree.HTMLParser()
+LOGGER = logging.getLogger(__name__)
 
 
 class KHOutsiderError(Exception):
@@ -38,9 +39,7 @@ def get_song_link(download_doc: etree._Element, prefer_flac: bool) -> str:
     return audio_link
 
 
-async def download_file(
-    url: str, session: aiohttp_retry.RetryClient, verbose: bool = False
-) -> None:
+async def download_file(url: str, session: aiohttp_retry.RetryClient) -> None:
     """Downloads the given url to an automatically named file on disk."""
     try:
         async with session.get(url) as response:
@@ -55,8 +54,7 @@ async def download_file(
                 # 10 MB chunks
                 async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
                     file.write(chunk)
-                if verbose:
-                    print(f"Downloaded file {filename}")
+        LOGGER.info("Downloaded file %s", filename)
     except BaseException:
         # Clean up after ourselves
         try:
@@ -71,7 +69,6 @@ async def process_download_page(
     url: str,
     session: aiohttp_retry.RetryClient,
     prefer_flac: bool,
-    verbose: bool = False,
 ) -> None:
     """Glues the parsing and downloading together for use as a task."""
     async with session.get(url) as resp:
@@ -81,7 +78,7 @@ async def process_download_page(
             audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
         except ValueError as err:
             raise KHOutsiderError(f"Could not find song links on {url}") from err
-    await download_file(audio_link, session, verbose)
+    await download_file(audio_link, session)
 
 
 INFO_SELECTOR = CSSSelector('p[align="left"]')
@@ -104,12 +101,8 @@ def get_track_count(album_doc: etree._Element) -> int:
 DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
 
 
-async def download_album(url: str, prefer_flac: bool, verbose: bool = False) -> None:
+async def download_album(url: str, prefer_flac: bool) -> None:
     """Top level imperative code for downloading an album."""
-
-    def print_if_verbose(*msg: str) -> None:
-        if verbose:
-            print(*msg, file=sys.stderr)
 
     retry_options = aiohttp_retry.JitterRetry(attempts=5)
     async with aiohttp_retry.RetryClient(
@@ -117,19 +110,17 @@ async def download_album(url: str, prefer_flac: bool, verbose: bool = False) -> 
     ) as session:
         try:
             async with session.get(url) as resp:
-                print_if_verbose("Obtained list URL...")
+                LOGGER.info("Obtained list URL...")
                 album_doc = etree.fromstring(await resp.text(), HTML_PARSER)
         except aiohttp.ClientError as err:
-            print("An error occurred in fetching the album at", url)
-            print(err)
+            LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
             return
-        print_if_verbose("Obtained URL for ", album_doc.findtext(".//h2"))
+        LOGGER.info("Obtained URL for %s", album_doc.findtext(".//h2"))
         try:
             track_count = get_track_count(album_doc)
+            LOGGER.info("%s songs available", track_count)
         except ValueError as err:
-            print_if_verbose("Could not find album info for", url)
-            print(err)
-        print_if_verbose(f"{track_count} songs available")
+            LOGGER.warning("Could not find album info for %s: %s", url, err)
         try:
             async with asyncio.TaskGroup() as tg:
                 download_page_urls = DOWNLOAD_PAGE_SELECTOR(album_doc)
@@ -150,20 +141,19 @@ async def download_album(url: str, prefer_flac: bool, verbose: bool = False) -> 
                             ),
                             session,
                             prefer_flac,
-                            verbose,
                         )
                     )
         except ExceptionGroup as err:
-            print(
-                "The following errors occurred while trying to download songs from the album at",
+            LOGGER.error(
+                "The following errors occurred while trying to download songs from the album at %s",
                 url,
             )
             match, rest = err.split((aiohttp.ClientError, KHOutsiderError))
             if match is not None:
                 for exc in match.exceptions:
-                    print(exc)
+                    LOGGER.error(str(exc))
             if rest is not None:
-                print("Unexpected errors occurred. Raising.")
+                LOGGER.error("Unexpected errors occurred. Raising.")
                 raise rest
 
 
@@ -185,7 +175,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    asyncio.run(download_album(args.url, args.verbose))
+    logging.basicConfig(format="%(levelname)s %(message)s")
+    root_logger = logging.getLogger()
+    if args.verbose:
+        root_logger.setLevel(logging.INFO)
+
+    asyncio.run(download_album(args.url, args.prefer_flac))
 
 
 if __name__ == "__main__":
