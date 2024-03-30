@@ -10,13 +10,38 @@ from lxml import etree
 from lxml.cssselect import CSSSelector
 
 
+HTML_PARSER = etree.HTMLParser()
+
+
 class KHOutsiderError(Exception):
-    pass
+    """An Error type for problems occurring in imperative code in this module."""
+
+
+DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
+
+
+def get_song_link(download_doc: etree._Element, prefer_flac: bool) -> str:
+    """Gets the URL of the song file from the document."""
+    audio_links = {
+        y[y.rindex(".") + 1 :]: y
+        for y in (
+            x.getparent().get("href") for x in DOWNLOAD_LINK_SELECTOR(download_doc)
+        )
+    }
+    if prefer_flac and "flac" in audio_links:
+        audio_link = audio_links["flac"]
+    else:
+        try:
+            audio_link = audio_links["mp3"]
+        except KeyError:
+            raise ValueError("No song links found in page.")
+    return audio_link
 
 
 async def download_file(
     url: str, session: aiohttp_retry.RetryClient, verbose: bool = False
 ) -> None:
+    """Downloads the given url to an automatically named file on disk."""
     try:
         async with session.get(url) as response:
             if "content-disposition" in response.headers:
@@ -42,48 +67,49 @@ async def download_file(
         raise
 
 
-DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
-
-
 async def process_download_page(
     url: str,
     session: aiohttp_retry.RetryClient,
-    html_parser: etree.HTMLParser,
     prefer_flac: bool,
     verbose: bool = False,
 ) -> None:
+    """Glues the parsing and downloading together for use as a task."""
     async with session.get(url) as resp:
-        download_doc = etree.fromstring(await resp.text(), html_parser)
-    audio_links = {
-        y[y.rindex(".") + 1 :]: y
-        for y in (
-            x.getparent().get("href") for x in DOWNLOAD_LINK_SELECTOR(download_doc)
-        )
-    }
-    if prefer_flac and "flac" in audio_links:
-        audio_link = audio_links["flac"]
-    else:
+        # URL join just in case it's a relative link.
+        download_doc = etree.fromstring(await resp.text(), HTML_PARSER)
         try:
-            audio_link = audio_links["mp3"]
-        except KeyError:
-            raise KHOutsiderError(f"Could not find download links on {url}")
-    # URL join just in case it's a relative link.
-    await download_file(urljoin(url, audio_link), session, verbose)
+            audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
+        except ValueError as err:
+            raise KHOutsiderError(f"Could not find song links on {url}") from err
+    await download_file(audio_link, session, verbose)
 
 
 INFO_SELECTOR = CSSSelector('p[align="left"]')
+
+
+def get_track_count(album_doc: etree._Element) -> int:
+    """Gets the number of tracks on the album from the document."""
+    try:
+        info_paragraph = etree.tostring(
+            INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
+        ).splitlines()
+    except IndexError:
+        raise ValueError("No info paragraph found in page.")
+    for line in info_paragraph:
+        if "Number of Files" in line:
+            return int(line.split(":")[-1])
+    raise ValueError("Info Paragraph did not contain number of files.")
+
+
 DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
 
 
-async def process_album_page(
-    url: str, prefer_flac: bool, verbose: bool = False
-) -> None:
+async def download_album(url: str, prefer_flac: bool, verbose: bool = False) -> None:
+    """Top level imperative code for downloading an album."""
 
     def print_if_verbose(*msg: str) -> None:
         if verbose:
             print(*msg, file=sys.stderr)
-
-    html_parser = etree.HTMLParser()
 
     retry_options = aiohttp_retry.JitterRetry(attempts=5)
     async with aiohttp_retry.RetryClient(
@@ -92,23 +118,18 @@ async def process_album_page(
         try:
             async with session.get(url) as resp:
                 print_if_verbose("Obtained list URL...")
-                album_doc = etree.fromstring(await resp.text(), html_parser)
+                album_doc = etree.fromstring(await resp.text(), HTML_PARSER)
         except aiohttp.ClientError as err:
             print("An error occurred in fetching the album at", url)
             print(err)
             return
         print_if_verbose("Obtained URL for ", album_doc.findtext(".//h2"))
         try:
-            info_paragraph = etree.tostring(
-                INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
-            ).splitlines()
-            for line in info_paragraph:
-                if "Number of Files" in line:
-                    track_count = int(line.split(":")[-1])
-                    break
-            print_if_verbose(f"{track_count} songs available")
-        except (IndexError, NameError):
+            track_count = get_track_count(album_doc)
+        except ValueError as err:
             print_if_verbose("Could not find album info for", url)
+            print(err)
+        print_if_verbose(f"{track_count} songs available")
         try:
             async with asyncio.TaskGroup() as tg:
                 download_page_urls = DOWNLOAD_PAGE_SELECTOR(album_doc)
@@ -128,7 +149,6 @@ async def process_album_page(
                                 ),
                             ),
                             session,
-                            html_parser,
                             prefer_flac,
                             verbose,
                         )
@@ -148,6 +168,7 @@ async def process_album_page(
 
 
 def main() -> None:
+    """Driver code for running as a shell script."""
     parser = argparse.ArgumentParser(
         prog="KHOutsider",
         description="Automatically download a full album from KHInsider",
@@ -164,7 +185,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    asyncio.run(process_album_page(args.url, args.verbose))
+    asyncio.run(download_album(args.url, args.verbose))
 
 
 if __name__ == "__main__":
