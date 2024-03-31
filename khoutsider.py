@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import os
+import pathlib
 from urllib.parse import unquote, urljoin
 
 import aiohttp
@@ -39,7 +40,9 @@ def get_song_link(download_doc: etree._Element, prefer_flac: bool) -> str:
     return audio_link
 
 
-async def download_file(url: str, session: aiohttp_retry.RetryClient) -> None:
+async def download_file(
+    url: str, session: aiohttp_retry.RetryClient, album_directory: pathlib.Path
+) -> None:
     """Downloads the given url to an automatically named file on disk."""
     try:
         async with session.get(url) as response:
@@ -50,7 +53,7 @@ async def download_file(url: str, session: aiohttp_retry.RetryClient) -> None:
                 filename = url.split("/")[-1]
 
             filename = unquote(filename)
-            with open(filename, mode="wb") as file:
+            with open(album_directory / filename, mode="wb") as file:
                 # 10 MB chunks
                 async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
                     file.write(chunk)
@@ -69,6 +72,7 @@ async def process_download_page(
     url: str,
     session: aiohttp_retry.RetryClient,
     prefer_flac: bool,
+    album_directory: pathlib.Path,
 ) -> None:
     """Glues the parsing and downloading together for use as a task."""
     async with session.get(url) as resp:
@@ -78,7 +82,7 @@ async def process_download_page(
             audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
         except ValueError as err:
             raise KHOutsiderError(f"Could not find song links on {url}") from err
-    await download_file(audio_link, session)
+    await download_file(audio_link, session, album_directory)
 
 
 INFO_SELECTOR = CSSSelector('p[align="left"]')
@@ -101,7 +105,9 @@ def get_track_count(album_doc: etree._Element) -> int:
 DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
 
 
-async def download_album(url: str, prefer_flac: bool) -> None:
+async def download_album(
+    url: str, prefer_flac: bool, output_directory: pathlib.Path
+) -> None:
     """Top level imperative code for downloading an album."""
 
     retry_options = aiohttp_retry.JitterRetry(attempts=5)
@@ -115,6 +121,12 @@ async def download_album(url: str, prefer_flac: bool) -> None:
         except aiohttp.ClientError as err:
             LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
             return
+        album_name = album_doc.findtext(".//h2")
+        if album_name is None:
+            LOGGER.error("Could not find album name for %s", url)
+            return
+        album_directory = output_directory / album_name
+        album_directory.mkdir(exist_ok=True)
         LOGGER.info("Obtained URL for %s", album_doc.findtext(".//h2"))
         try:
             track_count = get_track_count(album_doc)
@@ -141,6 +153,7 @@ async def download_album(url: str, prefer_flac: bool) -> None:
                             ),
                             session,
                             prefer_flac,
+                            album_directory,
                         )
                     )
         except ExceptionGroup as err:
@@ -172,6 +185,13 @@ def main() -> None:
         action="store_true",
         help="download FLAC files over MP3 if available",
     )
+    parser.add_argument(
+        "-o",
+        "--output-directory",
+        default=".",
+        type=pathlib.Path,
+        help="The directory to store albums in",
+    )
 
     args = parser.parse_args()
 
@@ -180,7 +200,11 @@ def main() -> None:
     if args.verbose:
         root_logger.setLevel(logging.INFO)
 
-    asyncio.run(download_album(args.url, args.prefer_flac))
+    if not args.output_directory.is_dir():
+        root_logger.error("Output directory %s does not exist.", args.output_directory)
+        return
+
+    asyncio.run(download_album(args.url, args.prefer_flac, args.output_directory))
 
 
 if __name__ == "__main__":
