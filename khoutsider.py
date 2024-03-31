@@ -57,7 +57,7 @@ async def download_file(
                 # 10 MB chunks
                 async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
                     file.write(chunk)
-        LOGGER.info("Downloaded file %s", filename)
+        LOGGER.info("Downloaded file in %s: %s", album_directory.name, filename)
     except BaseException:
         # Clean up after ourselves
         try:
@@ -116,8 +116,8 @@ async def download_album(
     ) as session:
         try:
             async with session.get(url) as resp:
-                LOGGER.info("Obtained list URL...")
                 album_doc = etree.fromstring(await resp.text(), HTML_PARSER)
+                LOGGER.info("Obtained list URL for %s", url)
         except aiohttp.ClientError as err:
             LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
             return
@@ -127,12 +127,12 @@ async def download_album(
             return
         album_directory = output_directory / album_name
         album_directory.mkdir(exist_ok=True)
-        LOGGER.info("Obtained URL for %s", album_doc.findtext(".//h2"))
+        LOGGER.info("Obtained URL for %s", album_name)
         try:
             track_count = get_track_count(album_doc)
-            LOGGER.info("%s songs available", track_count)
+            LOGGER.info("%s songs available for %s", track_count, album_name)
         except ValueError as err:
-            LOGGER.warning("Could not find album info for %s: %s", url, err)
+            LOGGER.warning("Could not find album info for %s: %s", album_name, err)
         try:
             async with asyncio.TaskGroup() as tg:
                 download_page_urls = DOWNLOAD_PAGE_SELECTOR(album_doc)
@@ -158,8 +158,8 @@ async def download_album(
                     )
         except ExceptionGroup as err:
             LOGGER.error(
-                "The following errors occurred while trying to download songs from the album at %s",
-                url,
+                "Errors occurred while trying to download songs from %s",
+                album_name,
             )
             match, rest = err.split((aiohttp.ClientError, KHOutsiderError))
             if match is not None:
@@ -170,15 +170,41 @@ async def download_album(
                 raise rest
 
 
+async def download_albums(
+    urls: list[str], prefer_flac: bool, output_directory: pathlib.Path
+) -> None:
+    """Concurrently download multiple albums."""
+    # gather is fragile. doesn't handle KeyboardInterrupt or SystemExit well, etc.
+    # TaskGroup would be better, but currently cancels all tasks in itself on error.
+    # if one album fails to download, we still want to be trying on the others.
+    # if gh-101581 ever gets resolved, probably switch to the result of that.
+    # https://github.com/python/cpython/issues/101581
+    exceptions = [
+        x
+        for x in await asyncio.gather(
+            *(download_album(url, prefer_flac, output_directory) for url in urls),
+            return_exceptions=True,
+        )
+        if isinstance(x, BaseException)
+    ]
+    if len(exceptions) != 0:
+        raise BaseExceptionGroup(
+            "Unexpected errors occured while downloading albums.", exceptions
+        )
+
+
 def main() -> None:
     """Driver code for running as a shell script."""
     parser = argparse.ArgumentParser(
         prog="KHOutsider",
         description="Automatically download a full album from KHInsider",
         epilog="Enjoy the tunes!",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    parser.add_argument("url", help="URL with the album tracklist")
+    parser.add_argument(
+        "urls", nargs="+", metavar="url", help="URL with the album tracklist"
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
         "--prefer-flac",
@@ -204,7 +230,7 @@ def main() -> None:
         root_logger.error("Output directory %s does not exist.", args.output_directory)
         return
 
-    asyncio.run(download_album(args.url, args.prefer_flac, args.output_directory))
+    asyncio.run(download_albums(args.urls, args.prefer_flac, args.output_directory))
 
 
 if __name__ == "__main__":
