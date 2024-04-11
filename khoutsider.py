@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import pathlib
+import shutil
 from urllib.parse import unquote, urljoin
 
 import aiohttp
@@ -44,28 +45,19 @@ async def download_file(
     url: str, session: aiohttp_retry.RetryClient, album_directory: pathlib.Path
 ) -> None:
     """Downloads the given url to an automatically named file on disk."""
-    try:
-        async with session.get(url) as response:
-            if "content-disposition" in response.headers:
-                header = response.headers["content-disposition"]
-                filename = header.split("filename=")[1]
-            else:
-                filename = url.split("/")[-1]
+    async with session.get(url) as response:
+        if "content-disposition" in response.headers:
+            header = response.headers["content-disposition"]
+            filename = header.split("filename=")[1]
+        else:
+            filename = url.split("/")[-1]
 
-            filename = unquote(filename)
-            with open(album_directory / filename, mode="wb") as file:
-                # 10 MB chunks
-                async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
-                    file.write(chunk)
-        LOGGER.info("Downloaded file in %s: %s", album_directory.name, filename)
-    except BaseException:
-        # Clean up after ourselves
-        try:
-            os.unlink(filename)
-        except FileNotFoundError:
-            pass
-        # Let the exception bubble up
-        raise
+        filename = unquote(filename)
+        with open(album_directory / filename, mode="wb") as file:
+            # 10 MB chunks
+            async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
+                file.write(chunk)
+    LOGGER.info("Downloaded file in %s: %s", album_directory.name, filename)
 
 
 async def process_download_page(
@@ -157,6 +149,8 @@ async def download_album(
                         )
                     )
         except ExceptionGroup as err:
+            # Clean up after ourselves
+            shutil.rmtree(album_directory, ignore_errors=True)
             LOGGER.error(
                 "Errors occurred while trying to download songs from %s",
                 album_name,
