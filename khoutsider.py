@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import logging
-import os
 import pathlib
 import shutil
 from urllib.parse import unquote, urljoin
@@ -70,10 +69,10 @@ async def process_download_page(
     async with session.get(url) as resp:
         # URL join just in case it's a relative link.
         download_doc = etree.fromstring(await resp.text(), HTML_PARSER)
-        try:
-            audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
-        except ValueError as err:
-            raise KHOutsiderError(f"Could not find song links on {url}") from err
+    try:
+        audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
+    except ValueError as err:
+        raise KHOutsiderError(f"Could not find song links on {url}") from err
     await download_file(audio_link, session, album_directory)
 
 
@@ -109,7 +108,7 @@ async def download_album(
         try:
             async with session.get(url) as resp:
                 album_doc = etree.fromstring(await resp.text(), HTML_PARSER)
-                LOGGER.info("Obtained list URL for %s", url)
+            LOGGER.info("Obtained list URL for %s", url)
         except aiohttp.ClientError as err:
             LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
             return
