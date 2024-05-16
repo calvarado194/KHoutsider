@@ -7,11 +7,10 @@ from urllib.parse import unquote, urljoin
 
 import aiohttp
 import aiohttp_retry
-from lxml import etree
+from lxml import html
 from lxml.cssselect import CSSSelector
 
 
-HTML_PARSER = etree.HTMLParser()
 LOGGER = logging.getLogger(__name__)
 
 
@@ -19,10 +18,10 @@ class KHOutsiderError(Exception):
     """An Error type for problems occurring in imperative code in this module."""
 
 
-DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink")
+DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink", translator="html")
 
 
-def get_song_link(download_doc: etree._Element, prefer_flac: bool) -> str:
+def get_song_link(download_doc: html.HtmlElement, prefer_flac: bool) -> str:
     """Gets the URL of the song file from the document."""
     audio_links = {
         y[y.rindex(".") + 1 :]: y
@@ -68,7 +67,7 @@ async def process_download_page(
     """Glues the parsing and downloading together for use as a task."""
     async with session.get(url) as resp:
         # URL join just in case it's a relative link.
-        download_doc = etree.fromstring(await resp.text(), HTML_PARSER)
+        download_doc = html.document_fromstring(await resp.text())
     try:
         audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
     except ValueError as err:
@@ -76,15 +75,13 @@ async def process_download_page(
     await download_file(audio_link, session, album_directory)
 
 
-INFO_SELECTOR = CSSSelector('p[align="left"]')
+INFO_SELECTOR = CSSSelector('p[align="left"]', translator="html")
 
 
-def get_track_count(album_doc: etree._Element) -> int:
+def get_track_count(album_doc: html.HtmlElement) -> int:
     """Gets the number of tracks on the album from the document."""
     try:
-        info_paragraph = etree.tostring(
-            INFO_SELECTOR(album_doc)[0], method="text", encoding="unicode"
-        ).splitlines()
+        info_paragraph = INFO_SELECTOR(album_doc)[0].text_content().splitlines()
     except IndexError:
         raise ValueError("No info paragraph found in page.")
     for line in info_paragraph:
@@ -93,7 +90,9 @@ def get_track_count(album_doc: etree._Element) -> int:
     raise ValueError("Info Paragraph did not contain number of files.")
 
 
-DOWNLOAD_PAGE_SELECTOR = CSSSelector("#songlist .playlistDownloadSong")
+DOWNLOAD_PAGE_SELECTOR = CSSSelector(
+    "#songlist .playlistDownloadSong", translator="html"
+)
 
 
 async def download_album(
@@ -107,7 +106,7 @@ async def download_album(
     ) as session:
         try:
             async with session.get(url) as resp:
-                album_doc = etree.fromstring(await resp.text(), HTML_PARSER)
+                album_doc = html.document_fromstring(await resp.text())
             LOGGER.info("Obtained list URL for %s", url)
         except aiohttp.ClientError as err:
             LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
