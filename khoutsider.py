@@ -8,7 +8,6 @@ from urllib.parse import unquote, urljoin
 import aiohttp
 import aiohttp_retry
 from lxml import html
-from lxml.cssselect import CSSSelector
 
 
 LOGGER = logging.getLogger(__name__)
@@ -18,15 +17,13 @@ class KHOutsiderError(Exception):
     """An Error type for problems occurring in imperative code in this module."""
 
 
-DOWNLOAD_LINK_SELECTOR = CSSSelector(".songDownloadLink", translator="html")
-
-
 def get_song_link(download_doc: html.HtmlElement, prefer_flac: bool) -> str:
     """Gets the URL of the song file from the document."""
     audio_links = {
         y[y.rindex(".") + 1 :]: y
         for y in (
-            x.getparent().get("href") for x in DOWNLOAD_LINK_SELECTOR(download_doc)
+            x.getparent().get("href")
+            for x in download_doc.find_class("songDownloadLink")
         )
     }
     if prefer_flac and "flac" in audio_links:
@@ -75,24 +72,18 @@ async def process_download_page(
     await download_file(audio_link, session, album_directory)
 
 
-INFO_SELECTOR = CSSSelector('p[align="left"]', translator="html")
-
-
 def get_track_count(album_doc: html.HtmlElement) -> int:
     """Gets the number of tracks on the album from the document."""
     try:
-        info_paragraph = INFO_SELECTOR(album_doc)[0].text_content().splitlines()
+        info_paragraph = (
+            album_doc.find(".//p[@align='left']").text_content().splitlines()
+        )
     except IndexError:
         raise ValueError("No info paragraph found in page.")
     for line in info_paragraph:
         if "Number of Files" in line:
             return int(line.split(":")[-1])
     raise ValueError("Info Paragraph did not contain number of files.")
-
-
-DOWNLOAD_PAGE_SELECTOR = CSSSelector(
-    "#songlist .playlistDownloadSong", translator="html"
-)
 
 
 async def download_album(
@@ -125,22 +116,13 @@ async def download_album(
             LOGGER.warning("Could not find album info for %s: %s", album_name, err)
         try:
             async with asyncio.TaskGroup() as tg:
-                download_page_urls = DOWNLOAD_PAGE_SELECTOR(album_doc)
+                download_page_urls = album_doc.find_class("playlistDownloadSong")
                 if len(download_page_urls) == 0:
                     raise KHOutsiderError(f"No songs found on {url}")
                 for download_page_url in download_page_urls:
                     tg.create_task(
                         process_download_page(
-                            urljoin(
-                                url,
-                                # is min necesssary here?
-                                # are there any pages that have multilple links here?
-                                # is min the right way to choose among them?
-                                min(
-                                    x.get("href")
-                                    for x in download_page_url.findall("a")
-                                ),
-                            ),
+                            urljoin(url, download_page_url.find("a").get("href")),
                             session,
                             prefer_flac,
                             album_directory,
