@@ -15,6 +15,7 @@ from urllib.parse import unquote, urljoin
 import aiohttp
 import aiohttp_retry
 from lxml import html
+from tqdm import tqdm
 
 LOGGER = logging.getLogger(__name__)
 
@@ -107,7 +108,10 @@ def get_song_link(download_doc: html.HtmlElement, prefer_flac: bool) -> str:
 
 
 async def download_file(
-    url: str, session: aiohttp_retry.RetryClient, output: DirectoryOutput
+    url: str,
+    session: aiohttp_retry.RetryClient,
+    output: DirectoryOutput,
+    progress: tqdm,
 ) -> None:
     """Downloads the given url to an automatically named file on disk."""
     async with session.get(url) as response:
@@ -118,10 +122,13 @@ async def download_file(
             filename = url.split("/")[-1]
 
         filename = unquote(filename)
+        progress.total += int(response.headers["content-length"])
+        progress.refresh()
         with output.open(filename) as file:
             # 10 MB chunks
             async for chunk in response.content.iter_chunked(1024 * 1024 * 10):
                 file.write(chunk)
+                progress.update(len(chunk))
     LOGGER.info("Downloaded file in %s: %s", output.album_directory.name, filename)
 
 
@@ -130,6 +137,7 @@ async def process_download_page(
     session: aiohttp_retry.RetryClient,
     prefer_flac: bool,
     output: DirectoryOutput,
+    progress: tqdm,
 ) -> None:
     """Glues the parsing and downloading together for use as a task."""
     async with session.get(url) as resp:
@@ -139,7 +147,7 @@ async def process_download_page(
         audio_link = urljoin(url, get_song_link(download_doc, prefer_flac))
     except ValueError as err:
         raise KHOutsiderError(f"Could not find song links on {url}") from err
-    await download_file(audio_link, session, output)
+    await download_file(audio_link, session, output, progress)
 
 
 def get_track_count(album_doc: html.HtmlElement) -> int:
@@ -162,6 +170,7 @@ async def download_album(
     output_directory: pathlib.Path,
     output_format: Literal["directory", "tar", "zip"],
     session: aiohttp_retry.RetryClient,
+    progress: tqdm,
 ) -> None:
     """Top level imperative code for downloading an album."""
 
@@ -204,6 +213,7 @@ async def download_album(
                         session,
                         prefer_flac,
                         output,
+                        progress,
                     )
                 )
     except ExceptionGroup as err:
@@ -225,6 +235,7 @@ async def download_albums(
     prefer_flac: bool,
     output_directory: pathlib.Path,
     output_format: Literal["directory", "tar", "zip"],
+    progress_bar: bool,
 ) -> None:
     """Concurrently download multiple albums."""
     # gather is fragile. doesn't handle KeyboardInterrupt or SystemExit well, etc.
@@ -232,6 +243,10 @@ async def download_albums(
     # if one album fails to download, we still want to be trying on the others.
     # if gh-101581 ever gets resolved, probably switch to the result of that.
     # https://github.com/python/cpython/issues/101581
+    progress = tqdm(
+        total=0, unit="byte", unit_scale=True, disable=None if progress_bar else True
+    )
+
     retry_options = aiohttp_retry.JitterRetry(attempts=5)
     async with aiohttp_retry.RetryClient(
         raise_for_status=True, retry_options=retry_options
@@ -241,7 +256,12 @@ async def download_albums(
             for x in await asyncio.gather(
                 *(
                     download_album(
-                        url, prefer_flac, output_directory, output_format, session
+                        url,
+                        prefer_flac,
+                        output_directory,
+                        output_format,
+                        session,
+                        progress,
                     )
                     for url in urls
                 ),
@@ -249,6 +269,7 @@ async def download_albums(
             )
             if isinstance(x, BaseException)
         ]
+        progress.close()
         if len(exceptions) != 0:
             raise BaseExceptionGroup(
                 "Unexpected errors occured while downloading albums.", exceptions
@@ -287,6 +308,9 @@ def main() -> None:
         choices=["directory", "tar", "zip"],
         help="How to output the album on disk. Directory of files, or as a zip or tar.",
     )
+    parser.add_argument(
+        "-p", "--progress-bar", action="store_true", help="Display a progress bar."
+    )
 
     args = parser.parse_args()
 
@@ -301,7 +325,11 @@ def main() -> None:
 
     asyncio.run(
         download_albums(
-            args.urls, args.prefer_flac, args.output_directory, args.output_format
+            args.urls,
+            args.prefer_flac,
+            args.output_directory,
+            args.output_format,
+            args.progress_bar,
         )
     )
 

@@ -14,6 +14,8 @@ The albums can be stored as flat files (`directory`), tar (`tar`) or zip (`zip`)
 
 If you wish to instead obtain the album in FLAC, you can provide `--prefer-flac`. Note that not all albums have FLAC downloads available.
 
+You can provide `--progress-bar` to display a progress bar for the downloads.
+
 You can run `--help` for a quick refresher on usage.
 
 ## License
