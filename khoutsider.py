@@ -25,6 +25,7 @@ class KHOutsiderError(Exception):
 
 class DirectoryOutput:
     """An output that stores files in a directory."""
+
     def __init__(self, output_directory: pathlib.Path, name: str) -> None:
         self.album_directory = output_directory / name
 
@@ -50,6 +51,7 @@ class DirectoryOutput:
 
 class TarOutput(DirectoryOutput):
     """An output that stores files in a tar archive."""
+
     async def __aexit__(
         self,
         exc_type: Type[BaseException],
@@ -66,6 +68,7 @@ class TarOutput(DirectoryOutput):
 
 class ZipOutput(DirectoryOutput):
     """An output that stores files in a zip archive."""
+
     async def __aexit__(
         self,
         exc_type: Type[BaseException],
@@ -158,66 +161,63 @@ async def download_album(
     prefer_flac: bool,
     output_directory: pathlib.Path,
     output_format: Literal["directory", "tar", "zip"],
+    session: aiohttp_retry.RetryClient,
 ) -> None:
     """Top level imperative code for downloading an album."""
 
-    retry_options = aiohttp_retry.JitterRetry(attempts=5)
-    async with aiohttp_retry.RetryClient(
-        raise_for_status=True, retry_options=retry_options
-    ) as session:
-        try:
-            async with session.get(url) as resp:
-                album_doc = html.document_fromstring(await resp.text())
-            LOGGER.info("Obtained list URL for %s", url)
-        except aiohttp.ClientError as err:
-            LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
-            return
-        album_name = album_doc.findtext(".//h2")
-        if album_name is None:
-            LOGGER.error("Could not find album name for %s", url)
-            return
-        LOGGER.info("Obtained URL for %s", album_name)
-        try:
-            track_count = get_track_count(album_doc)
-            LOGGER.info("%s songs available for %s", track_count, album_name)
-        except ValueError as err:
-            LOGGER.warning("Could not find album info for %s: %s", album_name, err)
-        match output_format:
-            case "directory":
-                output_type = DirectoryOutput
-            case "tar":
-                output_type = TarOutput
-            case "zip":
-                output_type = ZipOutput
-        try:
-            async with (
-                output_type(output_directory, album_name) as output,
-                asyncio.TaskGroup() as tg,
-            ):
-                download_page_urls = album_doc.find_class("playlistDownloadSong")
-                if len(download_page_urls) == 0:
-                    raise KHOutsiderError(f"No songs found on {url}")
-                for download_page_url in download_page_urls:
-                    tg.create_task(
-                        process_download_page(
-                            urljoin(url, download_page_url.find("a").get("href")),
-                            session,
-                            prefer_flac,
-                            output,
-                        )
+    try:
+        async with session.get(url) as resp:
+            album_doc = html.document_fromstring(await resp.text())
+        LOGGER.info("Obtained list URL for %s", url)
+    except aiohttp.ClientError as err:
+        LOGGER.error("An error occurred in fetching the album at %s: %s", url, err)
+        return
+    album_name = album_doc.findtext(".//h2")
+    if album_name is None:
+        LOGGER.error("Could not find album name for %s", url)
+        return
+    LOGGER.info("Obtained URL for %s", album_name)
+    try:
+        track_count = get_track_count(album_doc)
+        LOGGER.info("%s songs available for %s", track_count, album_name)
+    except ValueError as err:
+        LOGGER.warning("Could not find album info for %s: %s", album_name, err)
+    match output_format:
+        case "directory":
+            output_type = DirectoryOutput
+        case "tar":
+            output_type = TarOutput
+        case "zip":
+            output_type = ZipOutput
+    try:
+        async with (
+            output_type(output_directory, album_name) as output,
+            asyncio.TaskGroup() as tg,
+        ):
+            download_page_urls = album_doc.find_class("playlistDownloadSong")
+            if len(download_page_urls) == 0:
+                raise KHOutsiderError(f"No songs found on {url}")
+            for download_page_url in download_page_urls:
+                tg.create_task(
+                    process_download_page(
+                        urljoin(url, download_page_url.find("a").get("href")),
+                        session,
+                        prefer_flac,
+                        output,
                     )
-        except ExceptionGroup as err:
-            LOGGER.error(
-                "Errors occurred while trying to download songs from %s",
-                album_name,
-            )
-            match, rest = err.split((aiohttp.ClientError, KHOutsiderError))
-            if match is not None:
-                for exc in match.exceptions:
-                    LOGGER.error(str(exc))
-            if rest is not None:
-                LOGGER.error("Unexpected errors occurred. Raising.")
-                raise rest
+                )
+    except ExceptionGroup as err:
+        LOGGER.error(
+            "Errors occurred while trying to download songs from %s",
+            album_name,
+        )
+        match, rest = err.split((aiohttp.ClientError, KHOutsiderError))
+        if match is not None:
+            for exc in match.exceptions:
+                LOGGER.error(str(exc))
+        if rest is not None:
+            LOGGER.error("Unexpected errors occurred. Raising.")
+            raise rest
 
 
 async def download_albums(
@@ -232,21 +232,27 @@ async def download_albums(
     # if one album fails to download, we still want to be trying on the others.
     # if gh-101581 ever gets resolved, probably switch to the result of that.
     # https://github.com/python/cpython/issues/101581
-    exceptions = [
-        x
-        for x in await asyncio.gather(
-            *(
-                download_album(url, prefer_flac, output_directory, output_format)
-                for url in urls
-            ),
-            return_exceptions=True,
-        )
-        if isinstance(x, BaseException)
-    ]
-    if len(exceptions) != 0:
-        raise BaseExceptionGroup(
-            "Unexpected errors occured while downloading albums.", exceptions
-        )
+    retry_options = aiohttp_retry.JitterRetry(attempts=5)
+    async with aiohttp_retry.RetryClient(
+        raise_for_status=True, retry_options=retry_options
+    ) as session:
+        exceptions = [
+            x
+            for x in await asyncio.gather(
+                *(
+                    download_album(
+                        url, prefer_flac, output_directory, output_format, session
+                    )
+                    for url in urls
+                ),
+                return_exceptions=True,
+            )
+            if isinstance(x, BaseException)
+        ]
+        if len(exceptions) != 0:
+            raise BaseExceptionGroup(
+                "Unexpected errors occured while downloading albums.", exceptions
+            )
 
 
 def main() -> None:
