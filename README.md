@@ -8,9 +8,13 @@ A Python script to download whole soundtracks and albums from [KHInsider](https:
 
 You can supply multiple album URLs and all of them will be downloaded simultaneously.
 
-The albums will be downloaded into the directory specified with `--output-directory` (default `.`), with subdirectories of the album name.
+The albums will be downloaded into the directory specified with `--output-directory` (default `.`).
+
+The albums can be stored as flat files (`directory`), tar (`tar`) or zip (`zip`) using `--output-format` (default `directory`).
 
 If you wish to instead obtain the album in FLAC, you can provide `--prefer-flac`. Note that not all albums have FLAC downloads available.
+
+You can provide `--progress-bar` to display a progress bar for the downloads.
 
 You can run `--help` for a quick refresher on usage.
 
